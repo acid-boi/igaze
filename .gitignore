@@ -1,0 +1,50 @@
+# --- Project-specific ---
+
+# MediaPipe model bundle (~4MB). Re-downloadable; see README.
+face_landmarker.task
+*.task
+
+# Personal calibration — specific to your face, seating position, and
+# desk layout. Should not be shared or committed.
+igaze_calibration.json
+
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+venv/
+.venv/
+env/
+ENV/
+
+build/
+dist/
+*.egg-info/
+.eggs/
+
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+
+# --- Editors / OS ---
+.vscode/
+.idea/
+*.swp
+
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+
+
+# --- Local scratch ---
+*.log
+.env
+captures/
