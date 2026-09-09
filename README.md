@@ -65,6 +65,68 @@ treating "no face" as "go back to the Mac" fires exactly when the feature
 is working. Pass `--no-face-fallback-frames 300` (~10s) if you want a
 revert after you actually walk away.
 
+## Forwarding keystrokes + chords (phase 2)
+
+Keystrokes are forwarded to the Linux box as a **key-event timeline** (each
+key's down and up), not as characters. That's what makes real shortcuts
+work: `Cmd+Enter` on the Mac is replayed as `Super+Enter` on Omarchy and
+opens a terminal, because Super is genuinely held down while Enter fires.
+
+**macOS Cmd maps to Linux Super** (`KEY_LEFTMETA`). The current keymap is a
+deliberately minimal set: letters, digits, Enter/Space/Tab/Backspace, and
+the Cmd/Shift/Ctrl/Alt modifier families. Keys outside that set are dropped
+for now (punctuation, function keys, arrows come later).
+
+### On the Linux laptop: run the injector
+
+The injector writes into a virtual keyboard via `/dev/uinput`, which is why
+it works under Wayland/Hyprland (the kernel-level device sidesteps the
+compositor's synthetic-input block).
+
+```bash
+pip install evdev
+sudo python3 -m igaze.injector --port 5005
+```
+
+`sudo` is the zero-setup path. To run without it, add the udev rule below
+once.
+
+### On the Mac: forward to it
+
+```bash
+python -m igaze.main --send-to <linux-ip>:5005
+```
+
+Look at the Mac -> nothing is sent. Look at the Linux laptop -> keystrokes
+and chords land in the focused Omarchy window. The first run triggers the
+macOS **Input Monitoring** prompt (System Settings -> Privacy & Security);
+capture is passive, so your Mac keeps working normally.
+
+### Running the injector without sudo (one-time)
+
+```bash
+# As root, once:
+echo 'KERNEL=="uinput", GROUP="input", MODE="0660"' \
+  | sudo tee /etc/udev/rules.d/99-igaze-uinput.rules
+sudo udevadm control --reload-rules && sudo udevadm trigger
+sudo usermod -aG input $USER
+# then log out and back in so the group membership takes effect
+```
+
+After that, `python3 -m igaze.injector --port 5005` runs without sudo.
+
+### Safety notes built in
+
+* If your gaze drifts back to the Mac *mid-chord*, the key's release is
+  still forwarded, so you never get a stuck Super/Ctrl on the Linux side.
+* If the connection drops while keys are held, the injector releases them.
+* `recv_test.py` is still included as a no-hardware receiver if you want to
+  eyeball the raw event stream (`python3 recv_test.py 5005`) instead of
+  actually injecting.
+
+Without `--send-to`, igaze runs detection-only with no capture or
+networking.
+
 ## Tuning
 
 | Flag | Default | Effect |
@@ -82,7 +144,13 @@ really calibration problems.
 - `igaze/face_tracker.py` — landmarks → `FaceSignal(yaw_ratio, face_scale)`
 - `igaze/calibration.py` — persisted per-screen readings (`igaze_calibration.json`)
 - `igaze/gaze_state.py` — calibrated thresholding, distance adaptation, smoothing/hysteresis/debounce
-- `igaze/main.py` — calibration flow + live harness
+- `igaze/keymap.py` — macOS keys -> Linux KEY_ names, position-based, Cmd->Super
+- `igaze/keyboard_capture.py` — passive pynput listener (press+release), gaze-gated, stuck-key protection
+- `igaze/protocol.py` — key-event wire format (KEY_ name + down/up)
+- `igaze/sender.py` — reconnecting TCP client, batch-drains the queue under fast typing
+- `igaze/injector.py` — **Linux side**: replays the event timeline into /dev/uinput
+- `igaze/main.py` — calibration flow + live harness + forwarding
+- `recv_test.py` — Linux-side debug receiver (no hardware; prints the raw stream)
 
 ## macOS notes
 
@@ -96,5 +164,6 @@ API.
 
 ## Next steps
 
-Wire `GazeStateMachine` transitions into the keystroke capture and network
-layer instead of printing.
+Capture, forwarding, and uinput injection with chord support are wired
+in. Next: expand the keymap (punctuation, arrows, function keys), then
+encryption/authentication on the socket.

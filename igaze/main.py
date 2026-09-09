@@ -55,6 +55,15 @@ def main() -> None:
     )
     parser.add_argument("--calibration-path", type=Path, default=DEFAULT_PATH)
     parser.add_argument("--model-path", default="face_landmarker.task")
+    parser.add_argument(
+        "--send-to",
+        metavar="HOST:PORT",
+        help=(
+            "Forward keystrokes to this TCP endpoint while gaze is LINUX. "
+            "Test with `nc -l <port>` on the Linux box. Omit to run "
+            "detection only, with no capture or networking."
+        ),
+    )
     args = parser.parse_args()
 
     cap = cv2.VideoCapture(args.camera_index)
@@ -166,33 +175,81 @@ def run_live(cap, tracker: FaceTracker, calibration: Calibration, args) -> None:
 
     side = "right" if calibration.span > 0 else "left"
     print(f"Calibrated: Linux laptop is on your {side}.")
+
+    sender = None
+    capture = None
+    if args.send_to:
+        # Imported lazily so detection-only runs don't need pynput installed.
+        from igaze.gaze_state import GazeTarget
+        from igaze.keyboard_capture import KeyboardCapture
+        from igaze.sender import KeystrokeSender
+
+        host, port = _parse_endpoint(args.send_to)
+        sender = KeystrokeSender(host, port)
+        sender.start()
+        # The capture asks this each keypress: forward only when gaze == LINUX.
+        capture = KeyboardCapture(
+            on_event=lambda ev: sender.send_line(ev.encode()),
+            should_forward=lambda: machine.current == GazeTarget.LINUX,
+        )
+        capture.start()
+        print(f"Forwarding keystrokes to {host}:{port} while gaze is LINUX.")
+        print(f"On the Linux box, run:  nc -l {port}")
+        print("(First run will prompt for macOS Input Monitoring permission.)")
+
     print("Press 'q' in the video window to quit.\n")
 
-    while True:
-        ok, frame = cap.read()
-        if not ok:
-            break
+    try:
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
 
-        signal = tracker.measure(frame)  # raw frame, never mirrored
-        target, changed = machine.update(
-            signal.yaw_ratio if signal else None,
-            signal.face_scale if signal else None,
-        )
-        if changed:
-            print(f"[SWITCH] -> {target.value.upper()}")
+            signal = tracker.measure(frame)  # raw frame, never mirrored
+            target, changed = machine.update(
+                signal.yaw_ratio if signal else None,
+                signal.face_scale if signal else None,
+            )
+            if changed:
+                print(f"[SWITCH] -> {target.value.upper()}")
 
-        display = cv2.flip(frame, 1)
-        _draw_overlay(display, signal, machine, target)
-        cv2.imshow("igaze", display)
+            display = cv2.flip(frame, 1)
+            _draw_overlay(display, signal, machine, target, sender)
+            cv2.imshow("igaze", display)
 
-        if cv2.waitKey(1) & 0xFF == ord("q"):
-            break
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                break
+    finally:
+        if capture is not None:
+            capture.stop()
+        if sender is not None:
+            sender.stop()
 
 
-def _draw_overlay(display, signal, machine: GazeStateMachine, target: GazeTarget) -> None:
+def _parse_endpoint(endpoint: str) -> tuple[str, int]:
+    if ":" not in endpoint:
+        raise SystemExit(f"--send-to must be HOST:PORT, got {endpoint!r}")
+    host, _, port_str = endpoint.rpartition(":")
+    try:
+        return host, int(port_str)
+    except ValueError:
+        raise SystemExit(f"Invalid port in --send-to: {port_str!r}")
+
+
+def _draw_overlay(display, signal, machine: GazeStateMachine, target: GazeTarget, sender=None) -> None:
     width = display.shape[1]
     color = (0, 200, 0) if target == GazeTarget.MAC else (0, 140, 255)
     _text(display, f"TARGET: {target.value.upper()}", 40, color)
+
+    if sender is not None:
+        if sender.is_connected:
+            fwd = target == GazeTarget.LINUX
+            msg = "link up - FORWARDING" if fwd else "link up - idle (looking at Mac)"
+            col = (0, 140, 255) if fwd else (150, 150, 150)
+        else:
+            msg = "link down - waiting for listener"
+            col = (0, 0, 255)
+        _text(display, msg, 120, col, scale=0.55)
 
     if signal is None:
         _text(display, "no face - holding target", 70, (0, 0, 255), scale=0.6)
