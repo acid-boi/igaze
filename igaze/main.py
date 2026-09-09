@@ -64,7 +64,35 @@ def main() -> None:
             "detection only, with no capture or networking."
         ),
     )
+    parser.add_argument(
+        "--no-suppress",
+        action="store_true",
+        help=(
+            "Don't block forwarded keys from the Mac. Keys will type on BOTH "
+            "machines when looking at Linux (passive mode). By default, keys "
+            "are suppressed locally so only Linux receives them. Panic hatch: "
+            "press Esc 3x quickly to force-disable suppression."
+        ),
+    )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress the per-switch MAC/LINUX log lines.",
+    )
+    parser.add_argument(
+        "--no-window",
+        action="store_true",
+        help="Don't open the camera preview window; run detection with no GUI.",
+    )
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Shorthand for --quiet --no-window: run silently in the background.",
+    )
     args = parser.parse_args()
+    if args.headless:
+        args.quiet = True
+        args.no_window = True
 
     cap = cv2.VideoCapture(args.camera_index)
     if not cap.isOpened():
@@ -174,7 +202,8 @@ def run_live(cap, tracker: FaceTracker, calibration: Calibration, args) -> None:
     )
 
     side = "right" if calibration.span > 0 else "left"
-    print(f"Calibrated: Linux laptop is on your {side}.")
+    if not args.quiet:
+        print(f"Calibrated: Linux laptop is on your {side}.")
 
     sender = None
     capture = None
@@ -191,13 +220,17 @@ def run_live(cap, tracker: FaceTracker, calibration: Calibration, args) -> None:
         capture = KeyboardCapture(
             on_event=lambda ev: sender.send_line(ev.encode()),
             should_forward=lambda: machine.current == GazeTarget.LINUX,
+            suppress_local=not args.no_suppress,
         )
         capture.start()
-        print(f"Forwarding keystrokes to {host}:{port} while gaze is LINUX.")
-        print(f"On the Linux box, run:  nc -l {port}")
-        print("(First run will prompt for macOS Input Monitoring permission.)")
+        if not args.quiet:
+            print(f"Forwarding keystrokes to {host}:{port} while gaze is LINUX.")
+            mode = "passive (types on both)" if args.no_suppress else "suppressing local keys (KVM)"
+            print(f"Mode: {mode}.  Panic hatch: press Esc 3x to restore Mac keyboard.")
+            print("(First run may prompt for macOS Accessibility permission.)")
 
-    print("Press 'q' in the video window to quit.\n")
+    if not args.quiet:
+        print("Press 'q' in the video window to quit.  (Ctrl-C also works.)\n")
 
     try:
         while True:
@@ -210,15 +243,19 @@ def run_live(cap, tracker: FaceTracker, calibration: Calibration, args) -> None:
                 signal.yaw_ratio if signal else None,
                 signal.face_scale if signal else None,
             )
-            if changed:
+            if changed and not args.quiet:
                 print(f"[SWITCH] -> {target.value.upper()}")
 
-            display = cv2.flip(frame, 1)
-            _draw_overlay(display, signal, machine, target, sender)
-            cv2.imshow("igaze", display)
-
-            if cv2.waitKey(1) & 0xFF == ord("q"):
-                break
+            if not args.no_window:
+                display = cv2.flip(frame, 1)
+                _draw_overlay(display, signal, machine, target, sender)
+                cv2.imshow("igaze", display)
+                if cv2.waitKey(1) & 0xFF == ord("q"):
+                    break
+            # In headless/no-window mode there's no key to press; the loop
+            # runs until Ctrl-C (KeyboardInterrupt) or the camera closes.
+    except KeyboardInterrupt:
+        pass
     finally:
         if capture is not None:
             capture.stop()

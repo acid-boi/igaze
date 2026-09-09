@@ -36,20 +36,34 @@ except ImportError:
         "    pip install evdev\n"
     )
 
-from igaze.keymap import all_mapped_key_names
 from igaze.protocol import decode
 
 
 def _build_uinput() -> UInput:
-    """Create a virtual keyboard advertising exactly the keys our keymap can
-    emit. Validates every KEY_ name against evdev up front, so a typo in the
-    keymap fails loudly here instead of silently dropping keys later."""
-    key_codes = []
-    for name in all_mapped_key_names():
-        code = ecodes.ecodes.get(name)
-        if code is None:
-            sys.exit(f"keymap has an unknown evdev key name: {name!r}")
-        key_codes.append(code)
+    """Create a virtual keyboard that can emit EVERY standard keyboard key.
+
+    Critically, a uinput device can only ever emit keys it declared at
+    creation time -- writing an undeclared keycode silently does nothing. An
+    earlier version declared only the keys in this machine's copy of the
+    keymap, which meant that if the Mac's keymap and the injector's keymap
+    drifted (e.g. the injector wasn't restarted after a keymap update), the
+    extra keys -- punctuation, symbols, function keys -- were received and
+    then silently dropped by the kernel.
+
+    To make injection immune to that entirely, we declare the whole standard
+    keyboard here, independent of igaze's keymap. The Mac decides which keys
+    to send; the virtual device can always emit whatever arrives.
+    """
+    # Every KEY_* that evdev knows about, restricted to real single keycodes
+    # (skip the KEY_MAX/KEY_CNT sentinels and any non-int entries).
+    key_codes = sorted(
+        code
+        for name, code in ecodes.ecodes.items()
+        if isinstance(name, str)
+        and name.startswith("KEY_")
+        and name not in ("KEY_MAX", "KEY_CNT")
+        and isinstance(code, int)
+    )
 
     capabilities = {ecodes.EV_KEY: key_codes}
     try:
@@ -64,7 +78,7 @@ def _build_uinput() -> UInput:
         sys.exit(f"Could not open /dev/uinput: {e}")
 
 
-def _serve(ui: UInput, port: int) -> None:
+def _serve(ui: UInput, port: int, verbose: bool = False) -> None:
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind(("0.0.0.0", port))
@@ -86,7 +100,7 @@ def _serve(ui: UInput, port: int) -> None:
                 buffer += data
                 while b"\n" in buffer:
                     raw, buffer = buffer.split(b"\n", 1)
-                    _apply(ui, raw.decode("utf-8", "replace"), held)
+                    _apply(ui, raw.decode("utf-8", "replace"), held, verbose)
         except (ConnectionResetError, OSError):
             pass
         finally:
@@ -95,12 +109,18 @@ def _serve(ui: UInput, port: int) -> None:
             print("Mac disconnected; released any held keys. Waiting again.")
 
 
-def _apply(ui: UInput, line: str, held: set[int]) -> None:
+def _apply(ui: UInput, line: str, held: set[int], verbose: bool = False) -> None:
     event = decode(line)
     if event is None:
-        return  # skip garbled line rather than crash the stream
+        if verbose and line.strip():
+            print(f"  ? garbled line ignored: {line!r}")
+        return
     code = ecodes.ecodes.get(event.key_name)
     if code is None:
+        # Shouldn't happen now that we declare the full keyboard, but if the
+        # Mac ever sends a name evdev doesn't know, say so loudly rather than
+        # dropping it in silence.
+        print(f"  ! unknown key name from Mac, dropped: {event.key_name}")
         return
     ui.write(ecodes.EV_KEY, code, 1 if event.pressed else 0)
     ui.syn()
@@ -108,6 +128,8 @@ def _apply(ui: UInput, line: str, held: set[int]) -> None:
         held.add(code)
     else:
         held.discard(code)
+    if verbose:
+        print(f"  {'v' if event.pressed else '^'} {event.key_name}")
 
 
 def _flush_held(ui: UInput, held: set[int]) -> None:
@@ -121,11 +143,17 @@ def _flush_held(ui: UInput, held: set[int]) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="igaze Linux-side key injector")
     parser.add_argument("--port", type=int, default=5005)
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print each key as it's injected (v = down, ^ = up). Use this "
+        "to confirm punctuation etc. is actually arriving.",
+    )
     args = parser.parse_args()
 
     ui = _build_uinput()
     try:
-        _serve(ui, args.port)
+        _serve(ui, args.port, verbose=args.verbose)
     except KeyboardInterrupt:
         pass
     finally:
